@@ -53,6 +53,15 @@
   .flash { background: rgba(14,165,233,0.15) !important; }
 
   .error-msg { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 8px; display: none; }
+
+  .waveform-container { margin-bottom: 16px; }
+  .waveform-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .waveform-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #71717a; }
+  .waveform-window-ctrl { display: flex; align-items: center; gap: 6px; }
+  .waveform-window-ctrl label { font-size: 10px; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; }
+  .waveform-window-ctrl input { width: 56px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: center; }
+  .waveform-window-ctrl span { font-size: 10px; color: #71717a; }
+  .waveform-canvas { width: 100%; height: 100px; border-radius: 8px; background: #1a1a1e; display: block; }
 </style>
 </head>
 <body>
@@ -65,6 +74,17 @@
     <button class="btn btn-primary" id="listenBtn" onclick="toggleListen()">🎤 Listen</button>
   </div>
   <div class="energy-bar"><div class="energy-fill" id="energyFill" style="width:0%"></div></div>
+  <div class="waveform-container" id="waveformContainer" style="display:none">
+    <div class="waveform-header">
+      <span class="waveform-label">Waveform</span>
+      <div class="waveform-window-ctrl">
+        <label for="waveformWindow">Window</label>
+        <input type="number" id="waveformWindow" value="5" min="1" max="30" step="1">
+        <span>s</span>
+      </div>
+    </div>
+    <canvas class="waveform-canvas" id="waveformCanvas"></canvas>
+  </div>
   <div class="stats">
     <div><div class="stat-value" id="bpmDisplay">—</div><div class="stat-label">BPM</div></div>
     <div class="stat-divider"></div>
@@ -114,6 +134,9 @@ let audioCtx = null, analyser = null, stream = null;
 let onsetTimes = [], onsetEnergies = [], lastOnset = 0, prevEnergy = 0;
 let rafId = null, metCtx = null, metInterval = null, nextBeatTime = 0;
 
+let waveformSamples = []; // {time: performance.now(), rms: number}
+let waveformWindowSec = 5;
+
 const ONSET_THRESHOLD = 0.015, ONSET_COOLDOWN = 80, MIN_BPM = 40, MAX_BPM = 240;
 
 // Helpers
@@ -160,6 +183,113 @@ function estimateTS(times, energies) {
   return {beats:4, label:"4/4"};
 }
 
+// Waveform drawing
+function drawWaveform(now) {
+  const canvas = document.getElementById('waveformCanvas');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width * dpr;
+  const h = rect.height * dpr;
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  const windowMs = waveformWindowSec * 1000;
+  const startTime = now - windowMs;
+
+  // Draw waveform as filled area
+  if (waveformSamples.length > 1) {
+    ctx.beginPath();
+    const midY = h / 2;
+    ctx.moveTo(0, midY);
+    let started = false;
+    for (let i = 0; i < waveformSamples.length; i++) {
+      const s = waveformSamples[i];
+      if (s.time < startTime) continue;
+      const x = ((s.time - startTime) / windowMs) * w;
+      const amp = Math.min(s.rms * 6, 1);
+      const y = midY - amp * midY * 0.9;
+      if (!started) { ctx.moveTo(x, midY); started = true; }
+      ctx.lineTo(x, y);
+    }
+    // Mirror: draw bottom half going backwards
+    for (let i = waveformSamples.length - 1; i >= 0; i--) {
+      const s = waveformSamples[i];
+      if (s.time < startTime) continue;
+      const x = ((s.time - startTime) / windowMs) * w;
+      const amp = Math.min(s.rms * 6, 1);
+      const y = midY + amp * midY * 0.9;
+      ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(14, 165, 233, 0.3)';
+    ctx.fill();
+
+    // Draw center line on top
+    ctx.beginPath();
+    for (let i = 0; i < waveformSamples.length; i++) {
+      const s = waveformSamples[i];
+      if (s.time < startTime) continue;
+      const x = ((s.time - startTime) / windowMs) * w;
+      const amp = Math.min(s.rms * 6, 1);
+      const y = midY - amp * midY * 0.9;
+      if (i === 0 || waveformSamples[i - 1].time < startTime) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.stroke();
+
+    // Bottom mirror line
+    ctx.beginPath();
+    for (let i = 0; i < waveformSamples.length; i++) {
+      const s = waveformSamples[i];
+      if (s.time < startTime) continue;
+      const x = ((s.time - startTime) / windowMs) * w;
+      const amp = Math.min(s.rms * 6, 1);
+      const y = midY + amp * midY * 0.9;
+      if (i === 0 || waveformSamples[i - 1].time < startTime) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.stroke();
+  }
+
+  // Draw beat markers
+  for (let i = 0; i < onsetTimes.length; i++) {
+    const t = onsetTimes[i];
+    if (t < startTime) continue;
+    const x = ((t - startTime) / windowMs) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.strokeStyle = 'rgba(249, 115, 22, 0.8)';
+    ctx.lineWidth = 2 * dpr;
+    ctx.stroke();
+    // Small triangle marker at top
+    ctx.beginPath();
+    ctx.moveTo(x - 4 * dpr, 0);
+    ctx.lineTo(x + 4 * dpr, 0);
+    ctx.lineTo(x, 6 * dpr);
+    ctx.closePath();
+    ctx.fillStyle = '#f97316';
+    ctx.fill();
+  }
+
+  // Draw center zero-line
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.strokeStyle = 'rgba(113, 113, 122, 0.3)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
 // Audio processing
 function processAudio() {
   if (!analyser) return;
@@ -171,6 +301,13 @@ function processAudio() {
   document.getElementById('energyFill').style.width = Math.min(100, rms*800)+'%';
 
   const now = performance.now();
+
+  // Store waveform sample and prune old data
+  waveformSamples.push({time: now, rms: rms});
+  const cutoff = now - (waveformWindowSec + 2) * 1000;
+  while (waveformSamples.length > 0 && waveformSamples[0].time < cutoff) waveformSamples.shift();
+
+  drawWaveform(now);
   const delta = rms - prevEnergy;
   prevEnergy = rms*0.3 + prevEnergy*0.7;
 
@@ -203,6 +340,7 @@ async function toggleListen() {
     analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.1;
     src.connect(analyser);
     onsetTimes=[]; onsetEnergies=[]; prevEnergy=0; lastOnset=0;
+    waveformSamples = [];
     isListening = true;
     detectedBPM = null;
     document.getElementById('bpmDisplay').textContent = '—';
@@ -211,6 +349,7 @@ async function toggleListen() {
     document.getElementById('listenBtn').textContent = '⏹ Stop';
     document.getElementById('listenHint').style.display = 'block';
     document.getElementById('syncBtn').style.display = 'block';
+    document.getElementById('waveformContainer').style.display = 'block';
     rafId = requestAnimationFrame(processAudio);
   } catch(e) {
     errEl.textContent = 'Mic access error: ' + e.message + '. Try opening this page directly in your browser.';
@@ -229,6 +368,7 @@ function stopListen() {
   document.getElementById('listenHint').style.display = 'none';
   document.getElementById('syncBtn').style.display = 'none';
   document.getElementById('energyFill').style.width = '0%';
+  document.getElementById('waveformContainer').style.display = 'none';
 }
 
 // Metronome
@@ -336,6 +476,12 @@ function renderPresets() {
 }
 
 // Init
+document.getElementById('waveformWindow').addEventListener('change', function() {
+  const v = Math.max(1, Math.min(30, parseInt(this.value) || 5));
+  this.value = v;
+  waveformWindowSec = v;
+});
+
 renderBeats();
 renderPresets();
 tempoKnobCtrl = setupKnob(

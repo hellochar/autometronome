@@ -365,7 +365,13 @@ function processAudio() {
         metronomeBPM = bpm;
         updateTempoUI();
         if (autoStartThreshold > 0 && bpmConfidence >= autoStartThreshold) {
-          startMetronome();
+          // Compute next expected beat, compensating for input latency
+          const beatIntervalMs = 60000 / metronomeBPM;
+          const inputLatencyMs = (analyser ? analyser.fftSize / 44100 / 2 : 0) * 1000
+            + (audioCtx ? (audioCtx.baseLatency || 0) * 1000 : 0);
+          const lastOnsetReal = onsetTimes[onsetTimes.length - 1] - inputLatencyMs;
+          const nextBeat = lastOnsetReal + beatIntervalMs;
+          startMetronome(nextBeat);
         }
       }
     }
@@ -428,9 +434,29 @@ function playClick(ctx, time, accent) {
   o.start(time); o.stop(time+0.05);
 }
 
-function startMetronome() {
+function startMetronome(alignToPhaseMs) {
   metCtx = new (window.AudioContext || window.webkitAudioContext)();
-  curBeat = 0; nextBeatTime = metCtx.currentTime + 0.05;
+  const perfNow = performance.now();
+  const ctxNow = metCtx.currentTime;
+
+  // Output latency: delay between scheduling and sound reaching speakers
+  const outputLatency = (metCtx.baseLatency || 0) + (metCtx.outputLatency || 0);
+
+  curBeat = 0;
+
+  if (alignToPhaseMs != null) {
+    // Convert performance.now() timestamp to AudioContext time
+    const alignCtxTime = (alignToPhaseMs - perfNow) / 1000 + ctxNow;
+    // Schedule earlier by output latency so sound arrives on time
+    nextBeatTime = alignCtxTime - outputLatency;
+    // If in the past, advance by whole beat intervals
+    const beatInterval = 60 / metronomeBPM;
+    while (nextBeatTime < ctxNow + 0.005) {
+      nextBeatTime += beatInterval;
+    }
+  } else {
+    nextBeatTime = ctxNow + 0.05;
+  }
   function schedule() {
     while (nextBeatTime < metCtx.currentTime + 0.1) {
       playClick(metCtx, nextBeatTime, curBeat===0);

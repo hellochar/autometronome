@@ -26,7 +26,8 @@
   .energy-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #eab308, #ef4444); border-radius: 99px; transition: width 60ms; }
 
   .stats { display: flex; justify-content: space-around; text-align: center; }
-  .stat-value { font-size: 40px; font-family: ui-monospace, monospace; font-weight: 900; letter-spacing: -1px; }
+  .stat-value { font-size: 36px; font-family: ui-monospace, monospace; font-weight: 900; letter-spacing: -1px; }
+  .stat-value-unit { font-size: 18px; font-weight: 600; color: #71717a; }
   .stat-label { font-size: 11px; color: #71717a; margin-top: 4px; }
   .stat-divider { width: 1px; background: #3f3f46; }
 
@@ -53,6 +54,11 @@
   .flash { background: rgba(14,165,233,0.15) !important; }
 
   .error-msg { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; padding: 12px; border-radius: 10px; font-size: 13px; margin-top: 8px; display: none; }
+
+  .auto-start-ctrl { display: flex; align-items: center; gap: 6px; margin-top: 10px; justify-content: center; }
+  .auto-start-ctrl label { font-size: 11px; color: #71717a; }
+  .auto-start-ctrl input { width: 56px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: center; }
+  .auto-start-ctrl span { font-size: 11px; color: #71717a; }
 
   .waveform-container { margin-bottom: 16px; }
   .waveform-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -88,6 +94,8 @@
   <div class="stats">
     <div><div class="stat-value" id="bpmDisplay">—</div><div class="stat-label">BPM</div></div>
     <div class="stat-divider"></div>
+    <div><div class="stat-value" id="confidenceDisplay">—</div><div class="stat-label">Confidence</div></div>
+    <div class="stat-divider"></div>
     <div><div class="stat-value" id="tsDisplay">—</div><div class="stat-label">Time Sig</div></div>
   </div>
   <div id="listenHint" style="display:none; font-size:12px; color:#52525b; text-align:center; margin-top:12px;">
@@ -115,7 +123,12 @@
       <div><span class="knob-value" id="beatsVal">4</span></div>
     </div>
   </div>
-  <button class="btn-sync btn-sync-off" id="syncBtn" onclick="toggleSync()" style="display:none">Sync to detected BPM</button>
+  <button class="btn-sync btn-sync-on" id="syncBtn" onclick="toggleSync()">🔗 Synced to detected BPM</button>
+  <div class="auto-start-ctrl" id="autoStartCtrl">
+    <label for="autoStartThreshold">Auto-start at confidence</label>
+    <input type="number" id="autoStartThreshold" value="60" min="0" max="100" step="5">
+    <span>%</span>
+  </div>
 </div>
 
 <!-- Presets -->
@@ -128,8 +141,9 @@
 
 <script>
 // State
-let isListening = false, metActive = false, syncOn = false;
+let isListening = false, metActive = false, syncOn = true;
 let detectedBPM = null, metronomeBPM = 120, metBeats = 4, curBeat = 0;
+let bpmConfidence = 0, autoStartThreshold = 60;
 let audioCtx = null, analyser = null, stream = null;
 let onsetTimes = [], onsetEnergies = [], lastOnset = 0, prevEnergy = 0;
 let rafId = null, metCtx = null, metInterval = null, nextBeatTime = 0;
@@ -181,6 +195,27 @@ function estimateTS(times, energies) {
   if (mc===4) return {beats:4, label:"4/4"};
   if (mc>=5&&mc<=6) return {beats:6, label:"6/8"};
   return {beats:4, label:"4/4"};
+}
+
+function estimateConfidence(times) {
+  if (times.length < 3) return 0;
+  const r = times.slice(-12);
+  const ivs = [];
+  for (let i = 1; i < r.length; i++) ivs.push(r[i] - r[i - 1]);
+  if (ivs.length < 2) return 0;
+  const med = median(ivs);
+  const f = ivs.filter(v => v > med * 0.5 && v < med * 2);
+  if (f.length < 2) return 0;
+  // Factor 1: number of consistent beats (max contribution at 8+)
+  const countScore = Math.min(f.length / 8, 1) * 40;
+  // Factor 2: ratio of intervals that passed the filter
+  const ratioScore = (f.length / ivs.length) * 30;
+  // Factor 3: low coefficient of variation = tight clustering
+  const avg = f.reduce((a, b) => a + b, 0) / f.length;
+  const variance = f.reduce((a, b) => a + (b - avg) ** 2, 0) / f.length;
+  const cv = Math.sqrt(variance) / avg;
+  const cvScore = Math.max(0, 1 - cv * 5) * 30;
+  return Math.round(Math.min(100, countScore + ratioScore + cvScore));
 }
 
 // Waveform drawing
@@ -321,7 +356,19 @@ function processAudio() {
     setTimeout(() => card.classList.remove('flash'), 80);
 
     const bpm = estimateBPM(onsetTimes);
-    if (bpm) { detectedBPM = bpm; document.getElementById('bpmDisplay').textContent = bpm; if (syncOn) { metronomeBPM = bpm; updateTempoUI(); restartMetIfActive(); } }
+    bpmConfidence = estimateConfidence(onsetTimes);
+    document.getElementById('confidenceDisplay').innerHTML = bpmConfidence + '<span class="stat-value-unit">%</span>';
+    if (bpm) {
+      detectedBPM = bpm;
+      document.getElementById('bpmDisplay').textContent = bpm;
+      if (syncOn && !metActive) {
+        metronomeBPM = bpm;
+        updateTempoUI();
+        if (autoStartThreshold > 0 && bpmConfidence >= autoStartThreshold) {
+          startMetronome();
+        }
+      }
+    }
     const ts = estimateTS(onsetTimes, onsetEnergies);
     if (ts) document.getElementById('tsDisplay').textContent = ts.label;
   }
@@ -343,12 +390,13 @@ async function toggleListen() {
     waveformSamples = [];
     isListening = true;
     detectedBPM = null;
+    bpmConfidence = 0;
     document.getElementById('bpmDisplay').textContent = '—';
+    document.getElementById('confidenceDisplay').textContent = '—';
     document.getElementById('tsDisplay').textContent = '—';
     document.getElementById('listenBtn').className = 'btn btn-danger';
     document.getElementById('listenBtn').textContent = '⏹ Stop';
     document.getElementById('listenHint').style.display = 'block';
-    document.getElementById('syncBtn').style.display = 'block';
     document.getElementById('waveformContainer').style.display = 'block';
     rafId = requestAnimationFrame(processAudio);
   } catch(e) {
@@ -366,7 +414,6 @@ function stopListen() {
   document.getElementById('listenBtn').className = 'btn btn-primary';
   document.getElementById('listenBtn').textContent = '🎤 Listen';
   document.getElementById('listenHint').style.display = 'none';
-  document.getElementById('syncBtn').style.display = 'none';
   document.getElementById('energyFill').style.width = '0%';
   document.getElementById('waveformContainer').style.display = 'none';
 }
@@ -439,7 +486,7 @@ function toggleSync() {
   const btn = document.getElementById('syncBtn');
   btn.className = syncOn ? 'btn-sync btn-sync-on' : 'btn-sync btn-sync-off';
   btn.textContent = syncOn ? '🔗 Synced to detected BPM' : 'Sync to detected BPM';
-  if (syncOn && detectedBPM) { metronomeBPM = detectedBPM; updateTempoUI(); restartMetIfActive(); }
+  if (syncOn && detectedBPM && !metActive) { metronomeBPM = detectedBPM; updateTempoUI(); }
 }
 
 // Knob logic
@@ -480,6 +527,11 @@ document.getElementById('waveformWindow').addEventListener('change', function() 
   const v = Math.max(1, Math.min(30, parseInt(this.value) || 5));
   this.value = v;
   waveformWindowSec = v;
+});
+document.getElementById('autoStartThreshold').addEventListener('change', function() {
+  const v = Math.max(0, Math.min(100, parseInt(this.value) || 0));
+  this.value = v;
+  autoStartThreshold = v;
 });
 
 renderBeats();

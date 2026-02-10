@@ -77,6 +77,19 @@
   .waveform-window-ctrl input { width: 56px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: center; }
   .waveform-window-ctrl span { font-size: 10px; color: #71717a; }
   .waveform-canvas { width: 100%; height: 100px; border-radius: 8px; background: #1a1a1e; display: block; }
+
+  .adv-toggle { cursor: pointer; user-select: none; }
+  .adv-toggle-icon { color: #71717a; font-size: 12px; transition: transform 0.2s; display: inline-block; }
+  .adv-toggle-icon.open { transform: rotate(90deg); }
+  .adv-body { display: none; }
+  .adv-group-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #52525b; margin: 12px 0 6px; padding-top: 8px; border-top: 1px solid #3f3f46; }
+  .adv-group-label:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+  .adv-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; }
+  .adv-row label { font-size: 12px; color: #a1a1aa; flex: 1; }
+  .adv-row input { width: 80px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: right; }
+  .adv-row .adv-unit { font-size: 10px; color: #52525b; width: 24px; text-align: left; margin-left: 4px; }
+  .adv-reset { margin-top: 12px; text-align: center; }
+  .adv-reset button { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); padding: 6px 16px; border-radius: 8px; font-size: 12px; cursor: pointer; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -156,28 +169,86 @@
   <div class="presets-row" id="presetsRow"></div>
 </div>
 
+<!-- Advanced Settings -->
+<div class="card" id="advancedCard">
+  <div class="card-header adv-toggle" onclick="toggleAdvanced()" style="margin-bottom:0">
+    <span class="card-label">Advanced Settings</span>
+    <span class="adv-toggle-icon" id="advToggleIcon">▶</span>
+  </div>
+  <div class="adv-body" id="advBody"></div>
+</div>
+
 <div class="hint">Tip: Play consistently for 4+ beats for reliable BPM detection.</div>
 
 <script>
-// State
-let isListening = false, metActive = false, syncOn = true;
-let detectedBPM = null, metronomeBPM = 120, metBeats = 4, curBeat = 0;
-let bpmConfidence = 0, autoStartThreshold = 60, lagCompensationMs = 0;
+// ── Config schema ──
+const ADV_SCHEMA = [
+  {key:'onsetThreshold',  label:'Onset Threshold',       group:'Detection',       min:0.001, max:0.5,  step:0.001, default:0.015},
+  {key:'onsetCooldown',   label:'Onset Cooldown',         group:'Detection',       min:10,    max:500,  step:10,    default:80,    unit:'ms'},
+  {key:'energySmoothing', label:'Energy Smoothing',       group:'Detection',       min:0,     max:0.99, step:0.05,  default:0.7},
+  {key:'maxOnsets',       label:'Max Stored Onsets',      group:'Detection',       min:5,     max:100,  step:1,     default:30},
+  {key:'bpmWindowSize',   label:'BPM Window (onsets)',    group:'Detection',       min:3,     max:30,   step:1,     default:12},
+  {key:'tsWindowSize',    label:'Time Sig Window',        group:'Detection',       min:4,     max:30,   step:1,     default:16},
+  {key:'accentThreshold', label:'Accent Threshold (x avg)', group:'Detection',    min:1.0,   max:3.0,  step:0.1,   default:1.3},
+  {key:'minBPM',          label:'Min BPM',                group:'BPM Range',       min:20,    max:100,  step:1,     default:40},
+  {key:'maxBPM',          label:'Max BPM',                group:'BPM Range',       min:100,   max:400,  step:1,     default:240},
+  {key:'fftSize',         label:'FFT Size',               group:'Audio Analysis',  min:256,   max:8192, step:256,   default:2048},
+  {key:'analyserSmoothing', label:'Analyser Smoothing',   group:'Audio Analysis',  min:0,     max:1,    step:0.05,  default:0.1},
+  {key:'accentFreq',      label:'Accent Frequency',       group:'Metronome Sound', min:200,   max:4000, step:50,    default:1200,  unit:'Hz'},
+  {key:'normalFreq',      label:'Normal Frequency',       group:'Metronome Sound', min:200,   max:4000, step:50,    default:800,   unit:'Hz'},
+  {key:'accentVolume',    label:'Accent Volume',          group:'Metronome Sound', min:0.05,  max:1,    step:0.05,  default:0.6},
+  {key:'normalVolume',    label:'Normal Volume',          group:'Metronome Sound', min:0.05,  max:1,    step:0.05,  default:0.3},
+  {key:'clickDuration',   label:'Click Duration',         group:'Metronome Sound', min:0.01,  max:0.2,  step:0.01,  default:0.05,  unit:'s'},
+  {key:'energyBarScale',  label:'Energy Bar Scale',       group:'Display',         min:100,   max:2000, step:50,    default:800},
+  {key:'waveformAmpScale',label:'Waveform Amp Scale',     group:'Display',         min:1,     max:20,   step:0.5,   default:6},
+  {key:'calBPM',          label:'Calibration BPM',        group:'Calibration',     min:60,    max:200,  step:10,    default:120},
+  {key:'calLeadIn',       label:'Lead-in Beats',          group:'Calibration',     min:1,     max:8,    step:1,     default:4},
+  {key:'calMeasured',     label:'Measured Beats',         group:'Calibration',     min:4,     max:16,   step:1,     default:8},
+];
+
+const STORAGE_KEY = 'drumtempo_config';
+
+// Build defaults map
+const DEFAULTS = {};
+ADV_SCHEMA.forEach(s => DEFAULTS[s.key] = s.default);
+// Basic setting defaults
+Object.assign(DEFAULTS, {
+  metronomeBPM: 120, metBeats: 4, syncOn: true,
+  autoStartThreshold: 60, lagCompensationMs: 0, waveformWindowSec: 5
+});
+
+// Config object — loaded from localStorage, falling back to defaults
+let config = {};
+function loadConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    config = Object.assign({}, DEFAULTS, saved);
+  } catch(e) { config = Object.assign({}, DEFAULTS); }
+  // Validate fftSize to nearest power of 2
+  const log2 = Math.round(Math.log2(config.fftSize));
+  config.fftSize = Math.pow(2, Math.max(8, Math.min(13, log2)));
+}
+function saveConfig() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch(e) {}
+}
+loadConfig();
+
+// ── State (non-persisted runtime state) ──
+let isListening = false, metActive = false;
+let detectedBPM = null, curBeat = 0, bpmConfidence = 0;
 let audioCtx = null, analyser = null, stream = null;
 let onsetTimes = [], onsetEnergies = [], lastOnset = 0, prevEnergy = 0;
 let rafId = null, metCtx = null, metInterval = null, nextBeatTime = 0;
+let waveformSamples = [];
+let calActive = false;
+let advOpen = false;
 
-let waveformSamples = []; // {time: performance.now(), rms: number}
-let waveformWindowSec = 5;
-
-const ONSET_THRESHOLD = 0.015, ONSET_COOLDOWN = 80, MIN_BPM = 40, MAX_BPM = 240;
-
-// Helpers
-function median(a) { const s = [...a].sort((x,y)=>x-y); const m = Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; }
+// ── Helpers ──
+function median(a) { const s=[...a].sort((x,y)=>x-y); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
 
 function estimateBPM(times) {
   if (times.length < 3) return null;
-  const r = times.slice(-12);
+  const r = times.slice(-config.bpmWindowSize);
   const ivs = [];
   for (let i=1;i<r.length;i++) ivs.push(r[i]-r[i-1]);
   if (ivs.length < 2) return null;
@@ -186,12 +257,12 @@ function estimateBPM(times) {
   if (f.length < 2) return null;
   const avg = f.reduce((a,b)=>a+b,0)/f.length;
   const bpm = 60000/avg;
-  return (bpm >= MIN_BPM && bpm <= MAX_BPM) ? Math.round(bpm) : null;
+  return (bpm >= config.minBPM && bpm <= config.maxBPM) ? Math.round(bpm) : null;
 }
 
 function estimateTS(times, energies) {
   if (times.length < 8) return null;
-  const rt = times.slice(-16), re = energies.slice(-16);
+  const rt = times.slice(-config.tsWindowSize), re = energies.slice(-config.tsWindowSize);
   const ivs = [];
   for (let i=1;i<rt.length;i++) ivs.push(rt[i]-rt[i-1]);
   const med = median(ivs);
@@ -200,7 +271,7 @@ function estimateTS(times, energies) {
   const beatIv = f.reduce((a,b)=>a+b,0)/f.length;
   const avgE = re.reduce((a,b)=>a+b,0)/re.length;
   const accents = [];
-  for (let i=0;i<re.length;i++) if (re[i] > avgE*1.3) accents.push(i);
+  for (let i=0;i<re.length;i++) if (re[i] > avgE*config.accentThreshold) accents.push(i);
   if (accents.length < 2) return {beats:4, label:"4/4"};
   const gaps = [];
   for (let i=1;i<accents.length;i++) {
@@ -218,176 +289,133 @@ function estimateTS(times, energies) {
 
 function estimateConfidence(times) {
   if (times.length < 3) return 0;
-  const r = times.slice(-12);
+  const r = times.slice(-config.bpmWindowSize);
   const ivs = [];
-  for (let i = 1; i < r.length; i++) ivs.push(r[i] - r[i - 1]);
+  for (let i=1;i<r.length;i++) ivs.push(r[i]-r[i-1]);
   if (ivs.length < 2) return 0;
   const med = median(ivs);
-  const f = ivs.filter(v => v > med * 0.5 && v < med * 2);
+  const f = ivs.filter(v => v > med*0.5 && v < med*2);
   if (f.length < 2) return 0;
-  // Factor 1: number of consistent beats (max contribution at 8+)
-  const countScore = Math.min(f.length / 8, 1) * 40;
-  // Factor 2: ratio of intervals that passed the filter
-  const ratioScore = (f.length / ivs.length) * 30;
-  // Factor 3: low coefficient of variation = tight clustering
-  const avg = f.reduce((a, b) => a + b, 0) / f.length;
-  const variance = f.reduce((a, b) => a + (b - avg) ** 2, 0) / f.length;
-  const cv = Math.sqrt(variance) / avg;
-  const cvScore = Math.max(0, 1 - cv * 5) * 30;
-  return Math.round(Math.min(100, countScore + ratioScore + cvScore));
+  const countScore = Math.min(f.length/8, 1)*40;
+  const ratioScore = (f.length/ivs.length)*30;
+  const avg = f.reduce((a,b)=>a+b,0)/f.length;
+  const variance = f.reduce((a,b)=>a+(b-avg)**2,0)/f.length;
+  const cv = Math.sqrt(variance)/avg;
+  const cvScore = Math.max(0, 1-cv*5)*30;
+  return Math.round(Math.min(100, countScore+ratioScore+cvScore));
 }
 
-// Waveform drawing
+// ── Waveform drawing ──
 function drawWaveform(now) {
   const canvas = document.getElementById('waveformCanvas');
   if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = window.devicePixelRatio||1;
   const rect = canvas.getBoundingClientRect();
-  const w = rect.width * dpr;
-  const h = rect.height * dpr;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
+  const w = rect.width*dpr, h = rect.height*dpr;
+  if (canvas.width!==w||canvas.height!==h) { canvas.width=w; canvas.height=h; }
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, w, h);
+  ctx.clearRect(0,0,w,h);
+  const windowMs = config.waveformWindowSec*1000;
+  const startTime = now-windowMs;
+  const ampScale = config.waveformAmpScale;
 
-  const windowMs = waveformWindowSec * 1000;
-  const startTime = now - windowMs;
-
-  // Draw waveform as filled area
   if (waveformSamples.length > 1) {
+    const midY = h/2;
+    // Filled area
     ctx.beginPath();
-    const midY = h / 2;
-    ctx.moveTo(0, midY);
     let started = false;
-    for (let i = 0; i < waveformSamples.length; i++) {
-      const s = waveformSamples[i];
-      if (s.time < startTime) continue;
-      const x = ((s.time - startTime) / windowMs) * w;
-      const amp = Math.min(s.rms * 6, 1);
-      const y = midY - amp * midY * 0.9;
-      if (!started) { ctx.moveTo(x, midY); started = true; }
-      ctx.lineTo(x, y);
+    for (let i=0;i<waveformSamples.length;i++) {
+      const s=waveformSamples[i]; if(s.time<startTime) continue;
+      const x=((s.time-startTime)/windowMs)*w;
+      const amp=Math.min(s.rms*ampScale,1);
+      const y=midY-amp*midY*0.9;
+      if(!started){ctx.moveTo(x,midY);started=true;}
+      ctx.lineTo(x,y);
     }
-    // Mirror: draw bottom half going backwards
-    for (let i = waveformSamples.length - 1; i >= 0; i--) {
-      const s = waveformSamples[i];
-      if (s.time < startTime) continue;
-      const x = ((s.time - startTime) / windowMs) * w;
-      const amp = Math.min(s.rms * 6, 1);
-      const y = midY + amp * midY * 0.9;
-      ctx.lineTo(x, y);
+    for (let i=waveformSamples.length-1;i>=0;i--) {
+      const s=waveformSamples[i]; if(s.time<startTime) continue;
+      const x=((s.time-startTime)/windowMs)*w;
+      const amp=Math.min(s.rms*ampScale,1);
+      ctx.lineTo(x,midY+amp*midY*0.9);
     }
     ctx.closePath();
-    ctx.fillStyle = 'rgba(14, 165, 233, 0.3)';
+    ctx.fillStyle='rgba(14,165,233,0.3)';
     ctx.fill();
-
-    // Draw center line on top
+    // Top line
     ctx.beginPath();
-    for (let i = 0; i < waveformSamples.length; i++) {
-      const s = waveformSamples[i];
-      if (s.time < startTime) continue;
-      const x = ((s.time - startTime) / windowMs) * w;
-      const amp = Math.min(s.rms * 6, 1);
-      const y = midY - amp * midY * 0.9;
-      if (i === 0 || waveformSamples[i - 1].time < startTime) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    for (let i=0;i<waveformSamples.length;i++) {
+      const s=waveformSamples[i]; if(s.time<startTime) continue;
+      const x=((s.time-startTime)/windowMs)*w;
+      const y=midY-Math.min(s.rms*ampScale,1)*midY*0.9;
+      if(i===0||waveformSamples[i-1].time<startTime) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     }
-    ctx.strokeStyle = '#0ea5e9';
-    ctx.lineWidth = 1.5 * dpr;
-    ctx.stroke();
-
-    // Bottom mirror line
+    ctx.strokeStyle='#0ea5e9'; ctx.lineWidth=1.5*dpr; ctx.stroke();
+    // Bottom line
     ctx.beginPath();
-    for (let i = 0; i < waveformSamples.length; i++) {
-      const s = waveformSamples[i];
-      if (s.time < startTime) continue;
-      const x = ((s.time - startTime) / windowMs) * w;
-      const amp = Math.min(s.rms * 6, 1);
-      const y = midY + amp * midY * 0.9;
-      if (i === 0 || waveformSamples[i - 1].time < startTime) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    for (let i=0;i<waveformSamples.length;i++) {
+      const s=waveformSamples[i]; if(s.time<startTime) continue;
+      const x=((s.time-startTime)/windowMs)*w;
+      const y=midY+Math.min(s.rms*ampScale,1)*midY*0.9;
+      if(i===0||waveformSamples[i-1].time<startTime) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     }
-    ctx.strokeStyle = '#0ea5e9';
-    ctx.lineWidth = 1.5 * dpr;
-    ctx.stroke();
+    ctx.strokeStyle='#0ea5e9'; ctx.lineWidth=1.5*dpr; ctx.stroke();
   }
-
-  // Draw beat markers
-  for (let i = 0; i < onsetTimes.length; i++) {
-    const t = onsetTimes[i];
-    if (t < startTime) continue;
-    const x = ((t - startTime) / windowMs) * w;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.strokeStyle = 'rgba(249, 115, 22, 0.8)';
-    ctx.lineWidth = 2 * dpr;
-    ctx.stroke();
-    // Small triangle marker at top
-    ctx.beginPath();
-    ctx.moveTo(x - 4 * dpr, 0);
-    ctx.lineTo(x + 4 * dpr, 0);
-    ctx.lineTo(x, 6 * dpr);
-    ctx.closePath();
-    ctx.fillStyle = '#f97316';
-    ctx.fill();
+  // Beat markers
+  for (let i=0;i<onsetTimes.length;i++) {
+    const t=onsetTimes[i]; if(t<startTime) continue;
+    const x=((t-startTime)/windowMs)*w;
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h);
+    ctx.strokeStyle='rgba(249,115,22,0.8)'; ctx.lineWidth=2*dpr; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x-4*dpr,0); ctx.lineTo(x+4*dpr,0); ctx.lineTo(x,6*dpr);
+    ctx.closePath(); ctx.fillStyle='#f97316'; ctx.fill();
   }
-
-  // Draw center zero-line
-  ctx.beginPath();
-  ctx.moveTo(0, h / 2);
-  ctx.lineTo(w, h / 2);
-  ctx.strokeStyle = 'rgba(113, 113, 122, 0.3)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  // Zero line
+  ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2);
+  ctx.strokeStyle='rgba(113,113,122,0.3)'; ctx.lineWidth=1; ctx.stroke();
 }
 
-// Audio processing
+// ── Audio processing ──
 function processAudio() {
   if (!analyser) return;
   const data = new Float32Array(analyser.fftSize);
   analyser.getFloatTimeDomainData(data);
-  let sum = 0;
-  for (let i=0;i<data.length;i++) sum += data[i]*data[i];
+  let sum=0;
+  for (let i=0;i<data.length;i++) sum+=data[i]*data[i];
   const rms = Math.sqrt(sum/data.length);
-  document.getElementById('energyFill').style.width = Math.min(100, rms*800)+'%';
+  document.getElementById('energyFill').style.width = Math.min(100,rms*config.energyBarScale)+'%';
 
   const now = performance.now();
-
-  // Store waveform sample and prune old data
-  waveformSamples.push({time: now, rms: rms});
-  const cutoff = now - (waveformWindowSec + 2) * 1000;
-  while (waveformSamples.length > 0 && waveformSamples[0].time < cutoff) waveformSamples.shift();
+  waveformSamples.push({time:now, rms:rms});
+  const cutoff = now-(config.waveformWindowSec+2)*1000;
+  while (waveformSamples.length>0 && waveformSamples[0].time<cutoff) waveformSamples.shift();
 
   drawWaveform(now);
-  const delta = rms - prevEnergy;
-  prevEnergy = rms*0.3 + prevEnergy*0.7;
+  const sm = config.energySmoothing;
+  const delta = rms-prevEnergy;
+  prevEnergy = rms*(1-sm)+prevEnergy*sm;
 
-  if (delta > ONSET_THRESHOLD && now - lastOnset > ONSET_COOLDOWN) {
+  if (delta > config.onsetThreshold && now-lastOnset > config.onsetCooldown) {
     lastOnset = now;
     onsetTimes.push(now); onsetEnergies.push(rms);
-    if (onsetTimes.length > 30) { onsetTimes = onsetTimes.slice(-30); onsetEnergies = onsetEnergies.slice(-30); }
+    if (onsetTimes.length > config.maxOnsets) { onsetTimes=onsetTimes.slice(-config.maxOnsets); onsetEnergies=onsetEnergies.slice(-config.maxOnsets); }
 
     const card = document.getElementById('detectCard');
     card.classList.add('flash');
-    setTimeout(() => card.classList.remove('flash'), 80);
+    setTimeout(()=>card.classList.remove('flash'),80);
 
     const bpm = estimateBPM(onsetTimes);
     bpmConfidence = estimateConfidence(onsetTimes);
-    document.getElementById('confidenceDisplay').innerHTML = bpmConfidence + '<span class="stat-value-unit">%</span>';
+    document.getElementById('confidenceDisplay').innerHTML = bpmConfidence+'<span class="stat-value-unit">%</span>';
     if (bpm) {
       detectedBPM = bpm;
       document.getElementById('bpmDisplay').textContent = bpm;
-      if (syncOn && !metActive) {
-        metronomeBPM = bpm;
+      if (config.syncOn && !metActive) {
+        config.metronomeBPM = bpm; saveConfig();
         updateTempoUI();
-        if (autoStartThreshold > 0 && bpmConfidence >= autoStartThreshold) {
-          // Compute next expected beat, compensating for measured latency
-          const beatIntervalMs = 60000 / metronomeBPM;
-          const lastOnsetReal = onsetTimes[onsetTimes.length - 1] - lagCompensationMs;
-          const nextBeat = lastOnsetReal + beatIntervalMs;
+        if (config.autoStartThreshold > 0 && bpmConfidence >= config.autoStartThreshold) {
+          const beatIntervalMs = 60000/config.metronomeBPM;
+          const lastOnsetReal = onsetTimes[onsetTimes.length-1]-config.lagCompensationMs;
+          const nextBeat = lastOnsetReal+beatIntervalMs;
           startMetronome(nextBeat);
         }
       }
@@ -403,28 +431,27 @@ async function toggleListen() {
   const errEl = document.getElementById('errorMsg');
   errEl.style.display = 'none';
   try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate:44100});
-    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     const src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.1;
+    analyser.fftSize = config.fftSize;
+    analyser.smoothingTimeConstant = config.analyserSmoothing;
     src.connect(analyser);
     onsetTimes=[]; onsetEnergies=[]; prevEnergy=0; lastOnset=0;
-    waveformSamples = [];
-    isListening = true;
-    detectedBPM = null;
-    bpmConfidence = 0;
-    document.getElementById('bpmDisplay').textContent = '—';
-    document.getElementById('confidenceDisplay').textContent = '—';
-    document.getElementById('tsDisplay').textContent = '—';
-    document.getElementById('listenBtn').className = 'btn btn-danger';
-    document.getElementById('listenBtn').textContent = '⏹ Stop';
-    document.getElementById('listenHint').style.display = 'block';
-    document.getElementById('waveformContainer').style.display = 'block';
+    waveformSamples=[];
+    isListening=true; detectedBPM=null; bpmConfidence=0;
+    document.getElementById('bpmDisplay').textContent='—';
+    document.getElementById('confidenceDisplay').textContent='—';
+    document.getElementById('tsDisplay').textContent='—';
+    document.getElementById('listenBtn').className='btn btn-danger';
+    document.getElementById('listenBtn').textContent='⏹ Stop';
+    document.getElementById('listenHint').style.display='block';
+    document.getElementById('waveformContainer').style.display='block';
     rafId = requestAnimationFrame(processAudio);
   } catch(e) {
-    errEl.textContent = 'Mic access error: ' + e.message + '. Try opening this page directly in your browser.';
-    errEl.style.display = 'block';
+    errEl.textContent='Mic access error: '+e.message+'. Try opening this page directly in your browser.';
+    errEl.style.display='block';
     console.error(e);
   }
 }
@@ -434,290 +461,294 @@ function stopListen() {
   if (stream) stream.getTracks().forEach(t=>t.stop());
   if (audioCtx) audioCtx.close();
   audioCtx=null; analyser=null; stream=null; isListening=false;
-  document.getElementById('listenBtn').className = 'btn btn-primary';
-  document.getElementById('listenBtn').textContent = '🎤 Listen';
-  document.getElementById('listenHint').style.display = 'none';
-  document.getElementById('energyFill').style.width = '0%';
-  document.getElementById('waveformContainer').style.display = 'none';
+  document.getElementById('listenBtn').className='btn btn-primary';
+  document.getElementById('listenBtn').textContent='🎤 Listen';
+  document.getElementById('listenHint').style.display='none';
+  document.getElementById('energyFill').style.width='0%';
+  document.getElementById('waveformContainer').style.display='none';
 }
 
-// Metronome
+// ── Metronome ──
 function playClick(ctx, time, accent) {
-  const o = ctx.createOscillator(), g = ctx.createGain();
+  const o=ctx.createOscillator(), g=ctx.createGain();
   o.connect(g); g.connect(ctx.destination);
-  o.frequency.value = accent ? 1200 : 800;
-  g.gain.setValueAtTime(accent?0.6:0.3, time);
-  g.gain.exponentialRampToValueAtTime(0.001, time+0.05);
-  o.start(time); o.stop(time+0.05);
+  o.frequency.value = accent ? config.accentFreq : config.normalFreq;
+  g.gain.setValueAtTime(accent ? config.accentVolume : config.normalVolume, time);
+  g.gain.exponentialRampToValueAtTime(0.001, time+config.clickDuration);
+  o.start(time); o.stop(time+config.clickDuration);
 }
 
 function startMetronome(alignToPhaseMs) {
-  metCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const perfNow = performance.now();
-  const ctxNow = metCtx.currentTime;
-
-  curBeat = 0;
-
-  if (alignToPhaseMs != null) {
-    // Convert performance.now() timestamp to AudioContext time
-    const alignCtxTime = (alignToPhaseMs - perfNow) / 1000 + ctxNow;
-    nextBeatTime = alignCtxTime;
-    // If in the past, advance by whole beat intervals
-    const beatInterval = 60 / metronomeBPM;
-    while (nextBeatTime < ctxNow + 0.005) {
-      nextBeatTime += beatInterval;
-    }
+  metCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const perfNow=performance.now(), ctxNow=metCtx.currentTime;
+  curBeat=0;
+  if (alignToPhaseMs!=null) {
+    const alignCtxTime=(alignToPhaseMs-perfNow)/1000+ctxNow;
+    nextBeatTime=alignCtxTime;
+    const beatInterval=60/config.metronomeBPM;
+    while(nextBeatTime<ctxNow+0.005) nextBeatTime+=beatInterval;
   } else {
-    nextBeatTime = ctxNow + 0.05;
+    nextBeatTime=ctxNow+0.05;
   }
   function schedule() {
-    while (nextBeatTime < metCtx.currentTime + 0.1) {
-      playClick(metCtx, nextBeatTime, curBeat===0);
-      const b = curBeat;
-      const dt = (nextBeatTime - metCtx.currentTime)*1000;
-      setTimeout(()=>{ setCurBeat(b); }, Math.max(0,dt));
-      curBeat = (curBeat+1) % metBeats;
-      nextBeatTime += 60/metronomeBPM;
+    while (nextBeatTime<metCtx.currentTime+0.1) {
+      playClick(metCtx,nextBeatTime,curBeat===0);
+      const b=curBeat;
+      const dt=(nextBeatTime-metCtx.currentTime)*1000;
+      setTimeout(()=>{setCurBeat(b);},Math.max(0,dt));
+      curBeat=(curBeat+1)%config.metBeats;
+      nextBeatTime+=60/config.metronomeBPM;
     }
   }
-  metInterval = setInterval(schedule, 25);
+  metInterval=setInterval(schedule,25);
   schedule();
-  metActive = true;
-  document.getElementById('metBtn').className = 'btn btn-orange-off';
-  document.getElementById('metBtn').textContent = '⏹ Stop';
+  metActive=true;
+  document.getElementById('metBtn').className='btn btn-orange-off';
+  document.getElementById('metBtn').textContent='⏹ Stop';
 }
 
 function stopMetronome() {
-  if (metInterval) clearInterval(metInterval);
-  if (metCtx) metCtx.close();
+  if(metInterval) clearInterval(metInterval);
+  if(metCtx) metCtx.close();
   metCtx=null; metInterval=null; metActive=false; curBeat=0;
-  document.getElementById('metBtn').className = 'btn btn-orange';
-  document.getElementById('metBtn').textContent = '▶ Play';
+  document.getElementById('metBtn').className='btn btn-orange';
+  document.getElementById('metBtn').textContent='▶ Play';
   renderBeats();
 }
 
 function toggleMetronome() { metActive ? stopMetronome() : startMetronome(); }
-
-function restartMetIfActive() { if (metActive) { stopMetronome(); setTimeout(startMetronome, 50); } }
+function restartMetIfActive() { if(metActive){stopMetronome();setTimeout(startMetronome,50);} }
 
 function setCurBeat(b) {
-  const dots = document.querySelectorAll('.beat-dot');
-  dots.forEach((d,i) => {
-    d.className = 'beat-dot';
-    if (metActive && i===b) d.classList.add(i===0?'accent':'active');
+  const dots=document.querySelectorAll('.beat-dot');
+  dots.forEach((d,i)=>{
+    d.className='beat-dot';
+    if(metActive&&i===b) d.classList.add(i===0?'accent':'active');
   });
 }
 
 function renderBeats() {
-  const row = document.getElementById('beatsRow');
-  row.innerHTML = '';
-  for (let i=0;i<metBeats;i++) {
-    const d = document.createElement('div');
-    d.className = 'beat-dot';
-    d.textContent = i+1;
+  const row=document.getElementById('beatsRow');
+  row.innerHTML='';
+  for (let i=0;i<config.metBeats;i++) {
+    const d=document.createElement('div');
+    d.className='beat-dot'; d.textContent=i+1;
     row.appendChild(d);
   }
 }
 
-// Sync
+// ── Sync ──
 function toggleSync() {
-  syncOn = !syncOn;
-  const btn = document.getElementById('syncBtn');
-  btn.className = syncOn ? 'btn-sync btn-sync-on' : 'btn-sync btn-sync-off';
-  btn.textContent = syncOn ? '🔗 Synced to detected BPM' : 'Sync to detected BPM';
-  if (syncOn && detectedBPM && !metActive) { metronomeBPM = detectedBPM; updateTempoUI(); }
+  config.syncOn=!config.syncOn; saveConfig();
+  const btn=document.getElementById('syncBtn');
+  btn.className=config.syncOn?'btn-sync btn-sync-on':'btn-sync btn-sync-off';
+  btn.textContent=config.syncOn?'🔗 Synced to detected BPM':'Sync to detected BPM';
+  if(config.syncOn&&detectedBPM&&!metActive){config.metronomeBPM=detectedBPM;saveConfig();updateTempoUI();}
 }
 
-// Calibration
-let calActive = false;
+// ── Calibration ──
 async function startCalibration() {
-  if (calActive) return;
-  if (isListening) stopListen();
-  if (metActive) stopMetronome();
+  if(calActive) return;
+  if(isListening) stopListen();
+  if(metActive) stopMetronome();
+  calActive=true;
+  const calBtn=document.getElementById('calBtn');
+  const calStatus=document.getElementById('calStatus');
+  calBtn.disabled=true; calBtn.textContent='...';
 
-  calActive = true;
-  const calBtn = document.getElementById('calBtn');
-  const calStatus = document.getElementById('calStatus');
-  calBtn.disabled = true;
-  calBtn.textContent = '...';
-
-  const CAL_BPM = 120;
-  const CAL_BEAT_SEC = 60 / CAL_BPM;
-  const CAL_BEAT_MS = CAL_BEAT_SEC * 1000;
-  const CAL_LEAD_IN = 4;
-  const CAL_MEASURED = 8;
-  const CAL_TOTAL = CAL_LEAD_IN + CAL_MEASURED;
+  const CAL_BPM=config.calBPM;
+  const CAL_BEAT_SEC=60/CAL_BPM, CAL_BEAT_MS=CAL_BEAT_SEC*1000;
+  const CAL_LEAD_IN=config.calLeadIn, CAL_MEASURED=config.calMeasured;
+  const CAL_TOTAL=CAL_LEAD_IN+CAL_MEASURED;
 
   try {
-    // Set up mic for onset detection
-    const calMicCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 44100});
-    const calStream = await navigator.mediaDevices.getUserMedia({
-      audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: false}
-    });
-    const src = calMicCtx.createMediaStreamSource(calStream);
-    const calAnalyser = calMicCtx.createAnalyser();
-    calAnalyser.fftSize = 2048;
-    calAnalyser.smoothingTimeConstant = 0.1;
+    const calMicCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+    const calStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    const src=calMicCtx.createMediaStreamSource(calStream);
+    const calAnalyser=calMicCtx.createAnalyser();
+    calAnalyser.fftSize=config.fftSize; calAnalyser.smoothingTimeConstant=config.analyserSmoothing;
     src.connect(calAnalyser);
+    const calPlayCtx=new(window.AudioContext||window.webkitAudioContext)();
 
-    // Set up playback context for clicks
-    const calPlayCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-    // Schedule all clicks and record their perf.now() schedule times
-    const perfAtStart = performance.now();
-    const ctxAtStart = calPlayCtx.currentTime;
-    const clickScheduledPerfTimes = []; // perf.now() times for measured beats
-
-    for (let i = 0; i < CAL_TOTAL; i++) {
-      const ctxTime = ctxAtStart + 0.1 + i * CAL_BEAT_SEC;
-      playClick(calPlayCtx, ctxTime, i % 4 === 0);
-      // Convert scheduled ctx time to perf.now() domain
-      const perfTime = perfAtStart + (ctxTime - ctxAtStart) * 1000;
-      if (i >= CAL_LEAD_IN) {
-        clickScheduledPerfTimes.push(perfTime);
-      }
+    const perfAtStart=performance.now(), ctxAtStart=calPlayCtx.currentTime;
+    const clickScheduledPerfTimes=[];
+    for(let i=0;i<CAL_TOTAL;i++){
+      const ctxTime=ctxAtStart+0.1+i*CAL_BEAT_SEC;
+      playClick(calPlayCtx,ctxTime,i%4===0);
+      const perfTime=perfAtStart+(ctxTime-ctxAtStart)*1000;
+      if(i>=CAL_LEAD_IN) clickScheduledPerfTimes.push(perfTime);
     }
-
-    calStatus.textContent = 'Clap along to the beat...';
-
-    // Onset detection loop during calibration
-    const calOnsets = [];
-    let calPrevEnergy = 0, calLastOnset = 0, calDone = false;
-
-    function calProcess() {
-      if (calDone) return;
-      const data = new Float32Array(calAnalyser.fftSize);
+    calStatus.textContent='Clap along to the beat...';
+    const calOnsets=[];
+    let calPrevEnergy=0,calLastOnset=0,calDone=false;
+    function calProcess(){
+      if(calDone)return;
+      const data=new Float32Array(calAnalyser.fftSize);
       calAnalyser.getFloatTimeDomainData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-      const rms = Math.sqrt(sum / data.length);
-      const now = performance.now();
-      const delta = rms - calPrevEnergy;
-      calPrevEnergy = rms * 0.3 + calPrevEnergy * 0.7;
-      if (delta > ONSET_THRESHOLD && now - calLastOnset > ONSET_COOLDOWN) {
-        calLastOnset = now;
-        calOnsets.push(now);
-      }
+      let sum=0; for(let i=0;i<data.length;i++) sum+=data[i]*data[i];
+      const rms=Math.sqrt(sum/data.length);
+      const now=performance.now();
+      const delta=rms-calPrevEnergy;
+      calPrevEnergy=rms*(1-config.energySmoothing)+calPrevEnergy*config.energySmoothing;
+      if(delta>config.onsetThreshold&&now-calLastOnset>config.onsetCooldown){calLastOnset=now;calOnsets.push(now);}
       requestAnimationFrame(calProcess);
     }
     requestAnimationFrame(calProcess);
 
-    // Countdown display during lead-in
-    const leadInEnd = perfAtStart + (0.1 + CAL_LEAD_IN * CAL_BEAT_SEC) * 1000;
-    const totalEnd = perfAtStart + (0.1 + CAL_TOTAL * CAL_BEAT_SEC) * 1000 + 300;
-    const countdownInterval = setInterval(() => {
-      const now = performance.now();
-      if (now < leadInEnd) {
-        const beatsLeft = Math.ceil((leadInEnd - now) / CAL_BEAT_MS);
-        calStatus.textContent = 'Listen... starting in ' + beatsLeft;
-      } else if (now < totalEnd) {
-        const measured = Math.floor((now - leadInEnd) / CAL_BEAT_MS) + 1;
-        calStatus.textContent = 'Clap along! (' + Math.min(measured, CAL_MEASURED) + '/' + CAL_MEASURED + ')';
-      }
-    }, 100);
+    const leadInEnd=perfAtStart+(0.1+CAL_LEAD_IN*CAL_BEAT_SEC)*1000;
+    const totalEnd=perfAtStart+(0.1+CAL_TOTAL*CAL_BEAT_SEC)*1000+300;
+    const countdownInterval=setInterval(()=>{
+      const now=performance.now();
+      if(now<leadInEnd){calStatus.textContent='Listen... starting in '+Math.ceil((leadInEnd-now)/CAL_BEAT_MS);}
+      else if(now<totalEnd){const m=Math.floor((now-leadInEnd)/CAL_BEAT_MS)+1;calStatus.textContent='Clap along! ('+Math.min(m,CAL_MEASURED)+'/'+CAL_MEASURED+')';}
+    },100);
 
-    // Wait for all beats to finish + a little buffer
-    await new Promise(r => setTimeout(r, totalEnd - performance.now() + 200));
-    clearInterval(countdownInterval);
-    calDone = true;
+    await new Promise(r=>setTimeout(r,totalEnd-performance.now()+200));
+    clearInterval(countdownInterval); calDone=true;
+    calStream.getTracks().forEach(t=>t.stop()); calMicCtx.close(); calPlayCtx.close();
 
-    // Clean up
-    calStream.getTracks().forEach(t => t.stop());
-    calMicCtx.close();
-    calPlayCtx.close();
-
-    // Match onsets to scheduled clicks
-    const halfBeat = CAL_BEAT_MS / 2;
-    const offsets = [];
-    for (const scheduled of clickScheduledPerfTimes) {
-      let nearest = null, nearestDist = Infinity;
-      for (const onset of calOnsets) {
-        const dist = Math.abs(onset - scheduled);
-        if (dist < nearestDist) { nearestDist = dist; nearest = onset; }
-      }
-      if (nearest != null && nearestDist < halfBeat) {
-        offsets.push(nearest - scheduled);
-      }
+    const halfBeat=CAL_BEAT_MS/2, offsets=[];
+    for(const scheduled of clickScheduledPerfTimes){
+      let nearest=null,nearestDist=Infinity;
+      for(const onset of calOnsets){const dist=Math.abs(onset-scheduled);if(dist<nearestDist){nearestDist=dist;nearest=onset;}}
+      if(nearest!=null&&nearestDist<halfBeat) offsets.push(nearest-scheduled);
     }
-
-    if (offsets.length >= 3) {
-      const medOffset = Math.round(median(offsets));
-      lagCompensationMs = medOffset;
-      document.getElementById('lagMs').value = lagCompensationMs;
-      calStatus.textContent = 'Done! Measured ' + medOffset + 'ms latency (' + offsets.length + '/' + CAL_MEASURED + ' beats matched)';
+    if(offsets.length>=3){
+      const medOffset=Math.round(median(offsets));
+      config.lagCompensationMs=medOffset; saveConfig();
+      document.getElementById('lagMs').value=medOffset;
+      calStatus.textContent='Done! Measured '+medOffset+'ms latency ('+offsets.length+'/'+CAL_MEASURED+' beats matched)';
     } else {
-      calStatus.textContent = 'Not enough beats detected. Try again louder.';
+      calStatus.textContent='Not enough beats detected. Try again louder.';
     }
-  } catch(e) {
-    calStatus.textContent = 'Error: ' + e.message;
-  }
-
-  calActive = false;
-  calBtn.disabled = false;
-  calBtn.textContent = 'Calibrate';
+  } catch(e){ calStatus.textContent='Error: '+e.message; }
+  calActive=false; calBtn.disabled=false; calBtn.textContent='Calibrate';
 }
 
-// Knob logic
-function setupKnob(el, indEl, val, min, max, onChange) {
-  let dragging=false, startY=0, startVal=0;
-  function updateInd(v) { const pct = ((v-min)/(max-min))*270-135; indEl.style.transform = 'rotate('+pct+'deg)'; }
+// ── Knob logic ──
+function setupKnob(el,indEl,val,min,max,onChange) {
+  let dragging=false,startY=0,startVal=0;
+  function updateInd(v){const pct=((v-min)/(max-min))*270-135;indEl.style.transform='rotate('+pct+'deg)';}
   updateInd(val);
-  el.addEventListener('pointerdown', e => { dragging=true; startY=e.clientY; startVal=val; el.setPointerCapture(e.pointerId); });
-  el.addEventListener('pointermove', e => { if (!dragging) return; const d=startY-e.clientY; const nv=Math.round(Math.min(max,Math.max(min,startVal+(d/200)*(max-min)))); if(nv!==val){val=nv; updateInd(val); onChange(val);} });
-  el.addEventListener('pointerup', () => { dragging=false; });
-  return { setVal: v => { val=v; updateInd(v); } };
+  el.addEventListener('pointerdown',e=>{dragging=true;startY=e.clientY;startVal=val;el.setPointerCapture(e.pointerId);});
+  el.addEventListener('pointermove',e=>{if(!dragging)return;const d=startY-e.clientY;const nv=Math.round(Math.min(max,Math.max(min,startVal+(d/200)*(max-min))));if(nv!==val){val=nv;updateInd(val);onChange(val);}});
+  el.addEventListener('pointerup',()=>{dragging=false;});
+  return{setVal:v=>{val=v;updateInd(v);}};
 }
 
 function updateTempoUI() {
-  document.getElementById('tempoVal').textContent = metronomeBPM;
-  tempoKnobCtrl.setVal(metronomeBPM);
+  document.getElementById('tempoVal').textContent=config.metronomeBPM;
+  tempoKnobCtrl.setVal(config.metronomeBPM);
   renderPresets();
 }
 
 let tempoKnobCtrl, beatsKnobCtrl;
 
-// Presets
-const presets = [60,80,100,120,140,160,180];
+// ── Presets ──
+const presets=[60,80,100,120,140,160,180];
 function renderPresets() {
-  const row = document.getElementById('presetsRow');
-  row.innerHTML = '';
-  presets.forEach(bpm => {
-    const b = document.createElement('button');
-    b.className = 'preset-btn' + (metronomeBPM===bpm?' active':'');
-    b.textContent = bpm;
-    b.onclick = () => { metronomeBPM=bpm; updateTempoUI(); restartMetIfActive(); };
+  const row=document.getElementById('presetsRow');
+  row.innerHTML='';
+  presets.forEach(bpm=>{
+    const b=document.createElement('button');
+    b.className='preset-btn'+(config.metronomeBPM===bpm?' active':'');
+    b.textContent=bpm;
+    b.onclick=()=>{config.metronomeBPM=bpm;saveConfig();updateTempoUI();restartMetIfActive();};
     row.appendChild(b);
   });
 }
 
-// Init
-document.getElementById('waveformWindow').addEventListener('change', function() {
-  const v = Math.max(1, Math.min(30, parseInt(this.value) || 5));
-  this.value = v;
-  waveformWindowSec = v;
-});
-document.getElementById('autoStartThreshold').addEventListener('change', function() {
-  const v = Math.max(0, Math.min(100, parseInt(this.value) || 0));
-  this.value = v;
-  autoStartThreshold = v;
-});
-document.getElementById('lagMs').addEventListener('change', function() {
-  const v = Math.max(-500, Math.min(500, parseInt(this.value) || 0));
-  this.value = v;
-  lagCompensationMs = v;
-});
+// ── Advanced Settings Panel ──
+function toggleAdvanced() {
+  advOpen=!advOpen;
+  document.getElementById('advBody').style.display=advOpen?'block':'none';
+  document.getElementById('advToggleIcon').className='adv-toggle-icon'+(advOpen?' open':'');
+  document.getElementById('advancedCard').querySelector('.card-header').style.marginBottom=advOpen?'16px':'0';
+}
 
+function renderAdvancedPanel() {
+  const body=document.getElementById('advBody');
+  let html='';
+  let lastGroup='';
+  ADV_SCHEMA.forEach(s=>{
+    if(s.group!==lastGroup){
+      html+='<div class="adv-group-label">'+s.group+'</div>';
+      lastGroup=s.group;
+    }
+    html+='<div class="adv-row"><label>'+s.label+'</label>';
+    html+='<input type="number" data-key="'+s.key+'" value="'+config[s.key]+'" min="'+s.min+'" max="'+s.max+'" step="'+s.step+'">';
+    html+='<span class="adv-unit">'+(s.unit||'')+'</span></div>';
+  });
+  html+='<div class="adv-reset"><button onclick="resetAdvanced()">Reset to Defaults</button></div>';
+  body.innerHTML=html;
+
+  // Bind change events
+  body.querySelectorAll('input[data-key]').forEach(input=>{
+    input.addEventListener('change',function(){
+      const schema=ADV_SCHEMA.find(s=>s.key===this.dataset.key);
+      if(!schema) return;
+      let v=parseFloat(this.value);
+      if(isNaN(v)) v=schema.default;
+      v=Math.max(schema.min, Math.min(schema.max, v));
+      // Snap fftSize to power of 2
+      if(schema.key==='fftSize'){
+        const log2=Math.round(Math.log2(v));
+        v=Math.pow(2,Math.max(8,Math.min(13,log2)));
+      }
+      this.value=v;
+      config[schema.key]=v;
+      saveConfig();
+    });
+  });
+}
+
+function resetAdvanced() {
+  ADV_SCHEMA.forEach(s=>{ config[s.key]=s.default; });
+  saveConfig();
+  renderAdvancedPanel();
+}
+
+// ── Apply config to UI ──
+function applyConfigToUI() {
+  document.getElementById('tempoVal').textContent=config.metronomeBPM;
+  document.getElementById('beatsVal').textContent=config.metBeats;
+  document.getElementById('waveformWindow').value=config.waveformWindowSec;
+  document.getElementById('autoStartThreshold').value=config.autoStartThreshold;
+  document.getElementById('lagMs').value=config.lagCompensationMs;
+
+  const syncBtn=document.getElementById('syncBtn');
+  syncBtn.className=config.syncOn?'btn-sync btn-sync-on':'btn-sync btn-sync-off';
+  syncBtn.textContent=config.syncOn?'🔗 Synced to detected BPM':'Sync to detected BPM';
+}
+
+// ── Init ──
+applyConfigToUI();
+renderAdvancedPanel();
 renderBeats();
 renderPresets();
+
+document.getElementById('waveformWindow').addEventListener('change',function(){
+  const v=Math.max(1,Math.min(30,parseInt(this.value)||5));
+  this.value=v; config.waveformWindowSec=v; saveConfig();
+});
+document.getElementById('autoStartThreshold').addEventListener('change',function(){
+  const v=Math.max(0,Math.min(100,parseInt(this.value)||0));
+  this.value=v; config.autoStartThreshold=v; saveConfig();
+});
+document.getElementById('lagMs').addEventListener('change',function(){
+  const v=Math.max(-500,Math.min(500,parseInt(this.value)||0));
+  this.value=v; config.lagCompensationMs=v; saveConfig();
+});
+
 tempoKnobCtrl = setupKnob(
   document.getElementById('tempoKnob'), document.getElementById('tempoInd'),
-  120, MIN_BPM, MAX_BPM,
-  v => { metronomeBPM=v; document.getElementById('tempoVal').textContent=v; renderPresets(); restartMetIfActive(); }
+  config.metronomeBPM, config.minBPM, config.maxBPM,
+  v=>{config.metronomeBPM=v;saveConfig();document.getElementById('tempoVal').textContent=v;renderPresets();restartMetIfActive();}
 );
 beatsKnobCtrl = setupKnob(
   document.getElementById('beatsKnob'), document.getElementById('beatsInd'),
-  4, 2, 7,
-  v => { metBeats=v; document.getElementById('beatsVal').textContent=v; renderBeats(); restartMetIfActive(); }
+  config.metBeats, 2, 7,
+  v=>{config.metBeats=v;saveConfig();document.getElementById('beatsVal').textContent=v;renderBeats();restartMetIfActive();}
 );
 </script>
 </body>

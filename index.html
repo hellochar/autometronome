@@ -60,6 +60,15 @@
   .auto-start-ctrl input { width: 56px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: center; }
   .auto-start-ctrl span { font-size: 11px; color: #71717a; }
 
+  .lag-section { margin-top: 16px; border-top: 1px solid #3f3f46; padding-top: 12px; }
+  .lag-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #71717a; margin-bottom: 8px; text-align: center; }
+  .lag-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .lag-row label { font-size: 11px; color: #71717a; }
+  .lag-row input { width: 64px; background: #3f3f46; border: 1px solid #52525b; color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: ui-monospace, monospace; text-align: center; }
+  .lag-row span { font-size: 11px; color: #71717a; }
+  .btn-sm { padding: 6px 14px; font-size: 12px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; }
+  .cal-status { font-size: 12px; color: #a1a1aa; text-align: center; margin-top: 8px; min-height: 18px; }
+
   .waveform-container { margin-bottom: 16px; }
   .waveform-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .waveform-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #71717a; }
@@ -129,6 +138,16 @@
     <input type="number" id="autoStartThreshold" value="60" min="0" max="100" step="5">
     <span>%</span>
   </div>
+  <div class="lag-section">
+    <div class="lag-section-label">Latency Compensation</div>
+    <div class="lag-row">
+      <label for="lagMs">Offset</label>
+      <input type="number" id="lagMs" value="0" step="1">
+      <span>ms</span>
+      <button class="btn-sm btn-primary" id="calBtn" onclick="startCalibration()">Calibrate</button>
+    </div>
+    <div class="cal-status" id="calStatus"></div>
+  </div>
 </div>
 
 <!-- Presets -->
@@ -143,7 +162,7 @@
 // State
 let isListening = false, metActive = false, syncOn = true;
 let detectedBPM = null, metronomeBPM = 120, metBeats = 4, curBeat = 0;
-let bpmConfidence = 0, autoStartThreshold = 60;
+let bpmConfidence = 0, autoStartThreshold = 60, lagCompensationMs = 0;
 let audioCtx = null, analyser = null, stream = null;
 let onsetTimes = [], onsetEnergies = [], lastOnset = 0, prevEnergy = 0;
 let rafId = null, metCtx = null, metInterval = null, nextBeatTime = 0;
@@ -365,11 +384,9 @@ function processAudio() {
         metronomeBPM = bpm;
         updateTempoUI();
         if (autoStartThreshold > 0 && bpmConfidence >= autoStartThreshold) {
-          // Compute next expected beat, compensating for input latency
+          // Compute next expected beat, compensating for measured latency
           const beatIntervalMs = 60000 / metronomeBPM;
-          const inputLatencyMs = (analyser ? analyser.fftSize / 44100 / 2 : 0) * 1000
-            + (audioCtx ? (audioCtx.baseLatency || 0) * 1000 : 0);
-          const lastOnsetReal = onsetTimes[onsetTimes.length - 1] - inputLatencyMs;
+          const lastOnsetReal = onsetTimes[onsetTimes.length - 1] - lagCompensationMs;
           const nextBeat = lastOnsetReal + beatIntervalMs;
           startMetronome(nextBeat);
         }
@@ -439,16 +456,12 @@ function startMetronome(alignToPhaseMs) {
   const perfNow = performance.now();
   const ctxNow = metCtx.currentTime;
 
-  // Output latency: delay between scheduling and sound reaching speakers
-  const outputLatency = (metCtx.baseLatency || 0) + (metCtx.outputLatency || 0);
-
   curBeat = 0;
 
   if (alignToPhaseMs != null) {
     // Convert performance.now() timestamp to AudioContext time
     const alignCtxTime = (alignToPhaseMs - perfNow) / 1000 + ctxNow;
-    // Schedule earlier by output latency so sound arrives on time
-    nextBeatTime = alignCtxTime - outputLatency;
+    nextBeatTime = alignCtxTime;
     // If in the past, advance by whole beat intervals
     const beatInterval = 60 / metronomeBPM;
     while (nextBeatTime < ctxNow + 0.005) {
@@ -515,6 +528,135 @@ function toggleSync() {
   if (syncOn && detectedBPM && !metActive) { metronomeBPM = detectedBPM; updateTempoUI(); }
 }
 
+// Calibration
+let calActive = false;
+async function startCalibration() {
+  if (calActive) return;
+  if (isListening) stopListen();
+  if (metActive) stopMetronome();
+
+  calActive = true;
+  const calBtn = document.getElementById('calBtn');
+  const calStatus = document.getElementById('calStatus');
+  calBtn.disabled = true;
+  calBtn.textContent = '...';
+
+  const CAL_BPM = 120;
+  const CAL_BEAT_SEC = 60 / CAL_BPM;
+  const CAL_BEAT_MS = CAL_BEAT_SEC * 1000;
+  const CAL_LEAD_IN = 4;
+  const CAL_MEASURED = 8;
+  const CAL_TOTAL = CAL_LEAD_IN + CAL_MEASURED;
+
+  try {
+    // Set up mic for onset detection
+    const calMicCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 44100});
+    const calStream = await navigator.mediaDevices.getUserMedia({
+      audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: false}
+    });
+    const src = calMicCtx.createMediaStreamSource(calStream);
+    const calAnalyser = calMicCtx.createAnalyser();
+    calAnalyser.fftSize = 2048;
+    calAnalyser.smoothingTimeConstant = 0.1;
+    src.connect(calAnalyser);
+
+    // Set up playback context for clicks
+    const calPlayCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Schedule all clicks and record their perf.now() schedule times
+    const perfAtStart = performance.now();
+    const ctxAtStart = calPlayCtx.currentTime;
+    const clickScheduledPerfTimes = []; // perf.now() times for measured beats
+
+    for (let i = 0; i < CAL_TOTAL; i++) {
+      const ctxTime = ctxAtStart + 0.1 + i * CAL_BEAT_SEC;
+      playClick(calPlayCtx, ctxTime, i % 4 === 0);
+      // Convert scheduled ctx time to perf.now() domain
+      const perfTime = perfAtStart + (ctxTime - ctxAtStart) * 1000;
+      if (i >= CAL_LEAD_IN) {
+        clickScheduledPerfTimes.push(perfTime);
+      }
+    }
+
+    calStatus.textContent = 'Clap along to the beat...';
+
+    // Onset detection loop during calibration
+    const calOnsets = [];
+    let calPrevEnergy = 0, calLastOnset = 0, calDone = false;
+
+    function calProcess() {
+      if (calDone) return;
+      const data = new Float32Array(calAnalyser.fftSize);
+      calAnalyser.getFloatTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / data.length);
+      const now = performance.now();
+      const delta = rms - calPrevEnergy;
+      calPrevEnergy = rms * 0.3 + calPrevEnergy * 0.7;
+      if (delta > ONSET_THRESHOLD && now - calLastOnset > ONSET_COOLDOWN) {
+        calLastOnset = now;
+        calOnsets.push(now);
+      }
+      requestAnimationFrame(calProcess);
+    }
+    requestAnimationFrame(calProcess);
+
+    // Countdown display during lead-in
+    const leadInEnd = perfAtStart + (0.1 + CAL_LEAD_IN * CAL_BEAT_SEC) * 1000;
+    const totalEnd = perfAtStart + (0.1 + CAL_TOTAL * CAL_BEAT_SEC) * 1000 + 300;
+    const countdownInterval = setInterval(() => {
+      const now = performance.now();
+      if (now < leadInEnd) {
+        const beatsLeft = Math.ceil((leadInEnd - now) / CAL_BEAT_MS);
+        calStatus.textContent = 'Listen... starting in ' + beatsLeft;
+      } else if (now < totalEnd) {
+        const measured = Math.floor((now - leadInEnd) / CAL_BEAT_MS) + 1;
+        calStatus.textContent = 'Clap along! (' + Math.min(measured, CAL_MEASURED) + '/' + CAL_MEASURED + ')';
+      }
+    }, 100);
+
+    // Wait for all beats to finish + a little buffer
+    await new Promise(r => setTimeout(r, totalEnd - performance.now() + 200));
+    clearInterval(countdownInterval);
+    calDone = true;
+
+    // Clean up
+    calStream.getTracks().forEach(t => t.stop());
+    calMicCtx.close();
+    calPlayCtx.close();
+
+    // Match onsets to scheduled clicks
+    const halfBeat = CAL_BEAT_MS / 2;
+    const offsets = [];
+    for (const scheduled of clickScheduledPerfTimes) {
+      let nearest = null, nearestDist = Infinity;
+      for (const onset of calOnsets) {
+        const dist = Math.abs(onset - scheduled);
+        if (dist < nearestDist) { nearestDist = dist; nearest = onset; }
+      }
+      if (nearest != null && nearestDist < halfBeat) {
+        offsets.push(nearest - scheduled);
+      }
+    }
+
+    if (offsets.length >= 3) {
+      const medOffset = Math.round(median(offsets));
+      lagCompensationMs = medOffset;
+      document.getElementById('lagMs').value = lagCompensationMs;
+      calStatus.textContent = 'Done! Measured ' + medOffset + 'ms latency (' + offsets.length + '/' + CAL_MEASURED + ' beats matched)';
+    } else {
+      calStatus.textContent = 'Not enough beats detected. Try again louder.';
+    }
+  } catch(e) {
+    calStatus.textContent = 'Error: ' + e.message;
+  }
+
+  calActive = false;
+  calBtn.disabled = false;
+  calBtn.textContent = 'Calibrate';
+}
+
 // Knob logic
 function setupKnob(el, indEl, val, min, max, onChange) {
   let dragging=false, startY=0, startVal=0;
@@ -558,6 +700,11 @@ document.getElementById('autoStartThreshold').addEventListener('change', functio
   const v = Math.max(0, Math.min(100, parseInt(this.value) || 0));
   this.value = v;
   autoStartThreshold = v;
+});
+document.getElementById('lagMs').addEventListener('change', function() {
+  const v = Math.max(-500, Math.min(500, parseInt(this.value) || 0));
+  this.value = v;
+  lagCompensationMs = v;
 });
 
 renderBeats();
